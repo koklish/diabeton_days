@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Скриншоты прогонов приложения — рабочий мусор, не часть проекта.
+app/shots/

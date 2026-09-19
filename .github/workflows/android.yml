@@ -1,0 +1,92 @@
+name: Сборка APK
+
+# У владельца приложения нет компьютера — APK собирается здесь и выкладывается
+# в релизы, откуда его можно скачать прямо с телефона.
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'app/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Установить зависимости
+        working-directory: app
+        run: npm ci
+
+      - name: Собрать веб-часть
+        working-directory: app
+        run: npm run build
+
+      - name: Перенести сборку в Android-проект
+        working-directory: app
+        run: npx cap sync android
+
+      - name: Собрать APK
+        working-directory: app/android
+        env:
+          # Каждая сборка должна быть новее предыдущей, иначе Android
+          # откажется ставить её поверх установленной.
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+          ANDROID_VERSION_NAME: 1.0.${{ github.run_number }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Подготовить файл
+        id: apk
+        run: |
+          src=app/android/app/build/outputs/apk/release/app-release.apk
+          test -f "$src" || { echo "APK не найден"; find app/android/app/build/outputs -name '*.apk'; exit 1; }
+          mkdir -p out
+          cp "$src" out/diabeton-days.apk
+          echo "size=$(du -h out/diabeton-days.apk | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diabeton-days-apk
+          path: out/diabeton-days.apk
+
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="apk-v1.0.${{ github.run_number }}"
+          gh release create "$tag" out/diabeton-days.apk \
+            --title "Дневник СД 1.0.${{ github.run_number }}" \
+            --latest \
+            --notes "Сборка из ветки \`${{ github.ref_name }}\`, коммит \`${{ github.sha }}\`.
+
+          Размер APK: ${{ steps.apk.outputs.size }}
+
+          **Установка на телефон:** откройте эту страницу в браузере телефона, скачайте \`diabeton-days.apk\` и подтвердите установку из неизвестного источника. Ставится поверх предыдущей версии — данные дневника сохраняются.
+
+          Постоянная ссылка на свежую сборку:
+          https://github.com/${{ github.repository }}/releases/latest/download/diabeton-days.apk"
