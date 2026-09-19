@@ -1,21 +1,21 @@
 import { useState } from 'react'
-import type { FoodItem, Settings } from '../types'
+import { FOOD_ROLE_RU, type FoodItem, type FoodRole } from '../types'
 import { itemTotals, round } from '../lib/nutrition'
 import { ConfidenceChip } from './common'
 
+/** Редактор позиции. Наверху — роль и бытовая порция: именно так владелец
+ *  думает о еде. Цифры на 100 г спрятаны под «подробно» — они нужны редко. */
 export function ItemEditor({
   item,
-  settings,
   onChange,
   onRemove,
 }: {
   item: FoodItem
-  settings: Settings
   onChange: (next: FoodItem) => void
   onRemove: () => void
 }) {
   const [open, setOpen] = useState(false)
-  const t = itemTotals(item, settings)
+  const t = itemTotals(item)
 
   const setPer100 = (key: keyof FoodItem['per100'], value: number) =>
     onChange({ ...item, per100: { ...item.per100, [key]: value } })
@@ -28,6 +28,28 @@ export function ItemEditor({
           value={item.name}
           aria-label="Название"
           onChange={(e) => onChange({ ...item, name: e.target.value })}
+        />
+        <select
+          className="narrow"
+          value={item.role}
+          aria-label="Роль в тарелке"
+          onChange={(e) => onChange({ ...item, role: e.target.value as FoodRole })}
+        >
+          {(Object.keys(FOOD_ROLE_RU) as FoodRole[]).map((r) => (
+            <option key={r} value={r}>
+              {FOOD_ROLE_RU[r]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="inline" style={{ marginBottom: 6 }}>
+        <input
+          type="text"
+          value={item.portion}
+          aria-label="Порция"
+          placeholder="с кулак / две ложки"
+          onChange={(e) => onChange({ ...item, portion: e.target.value })}
         />
         <div className="narrow inline" style={{ gap: 4 }}>
           <input
@@ -44,12 +66,9 @@ export function ItemEditor({
       </div>
 
       <div className="chips" style={{ marginBottom: 6 }}>
-        <span className="chip key">{Math.round(t.kcal)} ккал</span>
-        <span className="chip">У {round(t.carbs)} г</span>
-        <span className="chip key">{round(t.xe, 1)} ХЕ</span>
-        <span className="chip">Б {round(t.protein)}</span>
-        <span className="chip">Ж {round(t.fat)}</span>
+        <span className="chip key">углеводы {round(t.carbs)} г</span>
         {item.gi != null && <span className="chip">ГИ {item.gi}</span>}
+        <span className="chip">{Math.round(t.kcal)} ккал</span>
         <ConfidenceChip level={item.confidence} />
       </div>
 
@@ -58,25 +77,25 @@ export function ItemEditor({
           Вероятный вес: {Math.round(item.gramsMin)}–{Math.round(item.gramsMax)} г
         </div>
       )}
-      {item.assumption && (
+      {item.note && (
         <div className="small muted" style={{ marginBottom: 6 }}>
-          {item.assumption}
+          {item.note}
         </div>
       )}
 
       <div className="btn-row">
         <button className="btn sm ghost" onClick={() => setOpen((v) => !v)}>
-          {open ? 'Свернуть' : 'На 100 г'}
+          {open ? 'Свернуть' : 'Подробно'}
         </button>
         <button className="btn sm ghost danger" onClick={onRemove}>
-          Удалить
+          Убрать
         </button>
       </div>
 
       {open && (
         <div style={{ marginTop: 10 }}>
           <div className="small muted" style={{ marginBottom: 6 }}>
-            Значения на 100 г готового блюда
+            На 100 г готового блюда
           </div>
           <div className="inline" style={{ marginBottom: 8 }}>
             <NumBox label="ккал" value={item.per100.kcal} onChange={(v) => setPer100('kcal', v)} />
@@ -118,4 +137,17 @@ function NumBox({
       />
     </label>
   )
+}
+
+export function blankItem(id: string): FoodItem {
+  return {
+    id,
+    name: '',
+    role: 'protein',
+    portion: '',
+    grams: 100,
+    per100: { kcal: 0, protein: 0, fat: 0, carbs: 0, fiber: 0 },
+    gi: null,
+    confidence: 'low',
+  }
 }

@@ -1,76 +1,104 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
 import * as z from 'zod/v4'
-import type { FoodItem, Settings } from '../types'
+import type { DayRecord, FoodItem, MealVerdict, Plate, Settings } from '../types'
+import { isLateWindow, isMorningWindow, profileToPrompt } from '../profile'
 import { uid } from './date'
+import { historyForPrompt } from './history'
 
-/** Схема ответа модели. Всё поля обязательные и без optional: строгий JSON-Schema
- *  не любит необязательные ключи, а «нет значения» выражаем через null. */
 const Per100Schema = z.object({
-  kcal: z.number().describe('Килокалории на 100 г готового блюда'),
+  kcal: z.number().describe('Ккал на 100 г готового блюда'),
   protein: z.number().describe('Белки, г на 100 г'),
   fat: z.number().describe('Жиры, г на 100 г'),
-  carbs: z.number().describe('Углеводы всего, г на 100 г (включая клетчатку)'),
+  carbs: z.number().describe('Углеводы всего, г на 100 г, включая клетчатку'),
   fiber: z.number().describe('Пищевые волокна, г на 100 г'),
 })
 
 const DishSchema = z.object({
-  name: z.string().describe('Короткое название блюда по-русски'),
-  detail: z.string().describe('Что именно видно: состав, способ приготовления, видимое масло/соус'),
-  grams: z.number().describe('Наиболее вероятный вес съедобной части порции, г'),
+  name: z.string().describe('Короткое название по-русски'),
+  role: z
+    .enum(['protein', 'starch', 'vegetable', 'fruit', 'fat', 'sweet', 'nuts', 'drink'])
+    .describe('Роль в тарелке. Именно она решает, как приём повлияет на сахар'),
+  portion: z.string().describe('Бытовое описание порции: «с кулак», «две столовые ложки», «половина тарелки»'),
+  grams: z.number().describe('Примерный вес съедобной части, г'),
   gramsMin: z.number().describe('Нижняя граница правдоподобного веса, г'),
   gramsMax: z.number().describe('Верхняя граница правдоподобного веса, г'),
   per100: Per100Schema,
-  gi: z.number().nullable().describe('Гликемический индекс 0-110; null для блюд почти без углеводов'),
-  confidence: z.enum(['high', 'medium', 'low']).describe('Уверенность в оценке именно этого блюда'),
-  assumption: z.string().describe('На чём основана оценка веса: посуда, ориентиры, стандартная порция'),
+  gi: z.number().nullable().describe('Гликемический индекс 0–110; null, если углеводов почти нет'),
+  confidence: z.enum(['high', 'medium', 'low']),
+  note: z.string().describe('Что именно видно: способ приготовления, видимое масло, соус. Пусто — пустая строка'),
 })
 
-const MealAnalysisSchema = z.object({
-  mealTitle: z.string().describe('Название приёма пищи одной строкой, например «Гречка с курицей и салат»'),
+const PlateSchema = z.object({
+  starches: z.number().describe('Сколько разных крахмалов в приёме'),
+  hasProtein: z.boolean(),
+  vegShare: z.enum(['none', 'some', 'half', 'most']).describe('Доля овощей в тарелке'),
+  hasSweet: z.boolean(),
+  proteinFirst: z.boolean().nullable().describe('Виден ли порядок «белок → овощи → гарнир». null, если по фото не видно'),
+})
+
+const AnalysisSchema = z.object({
+  mealTitle: z.string().describe('Название приёма одной строкой'),
   mealKind: z.enum(['breakfast', 'lunch', 'dinner', 'snack']),
   dishes: z.array(DishSchema),
-  overallConfidence: z.enum(['high', 'medium', 'low']),
-  warnings: z.array(z.string()).describe('Что мешает точной оценке: ракурс, скрытые слои, неизвестный соус'),
-  diabetesNote: z
-    .string()
-    .describe('2-4 предложения: как этот приём скажется на глюкозе и что можно поправить'),
-  questions: z
+  plate: PlateSchema,
+  explanation: z.string().describe('Одно-два предложения: почему сахар пойдёт так, а не иначе'),
+  expectedCurve: z.string().describe('Одна строка: как поведёт себя сахар по времени. Без выдуманной точности'),
+  verdict: z.enum(['честно', 'не честно']),
+  verdictReason: z.string().describe('Одна короткая строка: почему такой вердикт'),
+  isWin: z.boolean().describe('true, если это не просто нормально, а победа, которую стоит назвать вслух'),
+  wins: z.array(z.string()).describe('Что засчитать в плюс. Пустой список, если правда не за что'),
+  fix: z.string().nullable().describe('Одно конкретное действие, которое ещё можно сделать. null, если не нужно'),
+  warnings: z.array(z.string()).describe('Что мешает точной оценке или на что стоит обратить внимание'),
+  questions: z.array(z.string()).describe('Не больше трёх уточнений, которые реально изменят цифры'),
+  basedOnPastMeals: z
     .array(z.string())
-    .describe('Уточняющие вопросы, ответы на которые заметно повысят точность. Не больше трёх'),
+    .describe('Ссылки на похожие приёмы из истории в формате «2026-09-14 08:30 → 7,3». Пусто, если истории нет'),
 })
 
-export type MealAnalysis = z.infer<typeof MealAnalysisSchema>
+export type MealAnalysis = z.infer<typeof AnalysisSchema>
 
-const SYSTEM = `Ты — клинический нутрициолог, который помогает человеку с сахарным диабетом 2 типа вести дневник питания по фотографиям.
+const SYSTEM = `Ты помогаешь человеку с диабетом 2 типа разбирать приёмы пищи по фотографии. Разбор нужен ДО еды: он смотрит его, пока тарелка ещё перед ним, и успевает что-то изменить.
 
-Задача: по фото определить состав приёма пищи, оценить вес каждой позиции и дать пищевую ценность НА 100 Г готового блюда. Абсолютные значения порции приложение посчитает само — тебе нужны только вес и значения на 100 г.
+# Как писать
 
-Как оценивать вес:
-- Опирайся на видимые ориентиры масштаба: диаметр тарелки (обычная обеденная ≈ 24-27 см, десертная ≈ 19-20 см), столовый прибор (вилка ≈ 19 см, чайная ложка ≈ 14 см), стакан (200-250 мл), кружка (250-350 мл), рука, упаковка.
-- Учитывай высоту горки, а не только площадь: плоско размазанная порция и горка одного диаметра различаются вдвое.
-- Считай съедобную часть: без костей, кожуры, косточек, панциря.
-- Указывай gramsMin и gramsMax как честный диапазон. Если ракурс не даёт судить о высоте, диапазон должен быть широким, а confidence — low.
-- Не занижай оценку из вежливости. Систематическое занижение углеводов для диабетика опаснее, чем завышение.
+Коротко. Без преамбул, без «отличный выбор!», без восклицательных знаков, без нотаций и без морали. Обращайся на «ты».
 
-Как оценивать состав:
-- Разбивай на отдельные позиции всё, что различается по углеводам: гарнир, белковая часть, овощи, хлеб, соус, напиток, масло для жарки.
-- Видимое масло и заправка — отдельная позиция или явная надбавка к жирам блюда: их регулярно забывают, а на калорийность они влияют сильно.
-- Для углеводных блюд указывай гликемический индекс готового продукта. Помни, что степень разваренности и обработка меняют ГИ: паста аль денте ≈ 45, переваренная ≈ 65; картофельное пюре ≈ 85, отварной молодой картофель ≈ 60.
-- Значения на 100 г бери для ГОТОВОГО блюда, а не для сухой крупы: сухая гречка ≈ 340 ккал/100 г, отварная ≈ 100-110 ккал/100 г. Это самая частая ошибка — проверь себя.
-- Клетчатку указывай честно, включая её в общие углеводы.
+Честно в обе стороны. Если два крахмала — скажи прямо и сразу. Если приём поздний — напомни, что ночью он не сгорит, человек будет лежать, а не двигаться. Но если приём хороший — назови это вслух: видимый прогресс держит его на плаву сильнее, чем список ошибок. Собрал три тарелки без крахмала в буфете «всё включено» — это победа, а не «ну ладно».
 
-diabetesNote: коротко и по делу — как приём повлияет на глюкозу через 1-2 часа, что в нём главный источник углеводов, какая замена или добавка (белок, клетчатка, порядок еды) сгладила бы подъём. Без общих советов вроде «питайтесь сбалансированно». Не назначай и не меняй дозы препаратов — это дело врача.
+Никогда не пиши «нельзя», «вы нарушили», «норма превышена». Вместо запрета — как это сработает и какая будет цифра. Вина его ломает, а не выпрямляет: у него зависимость в анамнезе и нелеченая до конца депрессия.
 
-questions: только то, что реально меняет цифры (чем заправлено, сколько сахара в напитке, какой хлеб). Если фото достаточно — пустой список.`
+Не назначай, не отменяй и не меняй дозы препаратов. Максимум — «это вопрос к эндокринологу».
+
+# Что оценивать
+
+Не бухгалтерию калорий, а структуру тарелки: сколько крахмалов, есть ли белок, какая доля овощей, есть ли сладкое. Вес оценивай бытовыми мерками — «с кулак», «две столовые ложки». Точность до грамма всё равно иллюзорна, а давление от неё реальное.
+
+Значения per100 давай для ГОТОВОГО блюда, не для сухого продукта: сухая гречка ≈ 340 ккал/100 г, отварная ≈ 110. Это самая частая ошибка — проверь себя.
+
+Роли: крахмал — гречка, рис, картофель, хлеб, макароны, бобовые. Овощи — некрахмалистые. Орехи и фрукты отдельными ролями: они ведут себя по-разному. Видимое масло и заправку не пропускай.
+
+Опирайся на ориентиры масштаба: обеденная тарелка ≈ 24–27 см, десертная ≈ 19–20 см, вилка ≈ 19 см, стакан 200–250 мл. Учитывай высоту горки, а не только площадь. Если ракурс не даёт судить — ставь confidence low и широкий диапазон веса. Занижать углеводы опаснее, чем завысить.
+
+# Вердикт
+
+Ровно два значения: «честно» или «не честно». Это про соответствие его собственным правилам, а не про мораль. Нюансы — в explanation, одной-двумя фразами.
+
+isWin ставь только тогда, когда это правда достижение, а не просто отсутствие ошибок.
+
+fix — одно конкретное действие, которое он ещё успевает сделать: отложить половину гарнира, начать с белка, пройтись 20 минут после. Не список. Если делать нечего — null.
+
+# История
+
+Если в контексте есть его прошлые приёмы с цифрами сахара — используй их. «В прошлые три раза такое сочетание давало тебе 7,5» полезнее любой теории. Ссылки на такие приёмы клади в basedOnPastMeals. Если похожих нет — не выдумывай.`
 
 function buildClient(settings: Settings): Anthropic {
   const key = settings.anthropicApiKey.trim()
-  if (!key) throw new AiError('no-key', 'Не задан ключ Anthropic API. Откройте «Настройки».')
+  if (!key) throw new AiError('no-key', 'Не задан ключ Anthropic API. Открой «Настройки».')
   return new Anthropic({
     apiKey: key,
-    // Ключ лежит на устройстве пользователя и уходит только в api.anthropic.com.
-    // Это личное приложение: отдельного сервера-прокси нет.
+    // Ключ лежит на устройстве и уходит только в api.anthropic.com:
+    // отдельного сервера у приложения нет.
     dangerouslyAllowBrowser: true,
     maxRetries: 2,
   })
@@ -88,47 +116,71 @@ export class AiError extends Error {
 
 function toAiError(err: unknown): AiError {
   if (err instanceof AiError) return err
-  if (err instanceof Anthropic.AuthenticationError) {
-    return new AiError('auth', 'Ключ Anthropic API отклонён. Проверьте его в настройках.')
-  }
-  if (err instanceof Anthropic.PermissionDeniedError) {
-    return new AiError('auth', 'У ключа нет доступа к этой модели. Проверьте тариф и настройки ключа.')
-  }
-  if (err instanceof Anthropic.RateLimitError) {
-    return new AiError('rate-limit', 'Слишком много запросов подряд. Подождите минуту и повторите.')
-  }
-  if (err instanceof Anthropic.APIConnectionError) {
-    return new AiError('network', 'Нет связи с api.anthropic.com. Проверьте интернет.')
-  }
-  if (err instanceof Anthropic.APIError) {
-    return new AiError('unknown', `Ошибка API: ${err.message}`)
-  }
+  if (err instanceof Anthropic.AuthenticationError)
+    return new AiError('auth', 'Ключ Anthropic API отклонён. Проверь его в настройках.')
+  if (err instanceof Anthropic.PermissionDeniedError)
+    return new AiError('auth', 'У ключа нет доступа к этой модели. Проверь тариф.')
+  if (err instanceof Anthropic.RateLimitError)
+    return new AiError('rate-limit', 'Слишком много запросов подряд. Подожди минуту.')
+  if (err instanceof Anthropic.APIConnectionError)
+    return new AiError('network', 'Нет связи с api.anthropic.com. Проверь интернет.')
+  if (err instanceof Anthropic.APIError) return new AiError('unknown', `Ошибка API: ${err.message}`)
   return new AiError('unknown', err instanceof Error ? err.message : String(err))
 }
 
 export interface AnalyzeInput {
-  imageBase64: string
-  mediaType: 'image/jpeg' | 'image/png' | 'image/webp'
-  /** Подсказка пользователя: «хлеб два куска», «чай без сахара». */
+  imageBase64?: string
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/webp'
+  /** Описание словами — когда фото нет или его мало. */
+  description?: string
+  /** Уточнение от человека: оно важнее догадки модели. */
   hint?: string
   time: string
   settings: Settings
+  /** Недавние дни — источник личных закономерностей. */
+  history: DayRecord[]
+  /** Последний известный сахар, если он есть: разбор без него слеп. */
+  currentGlucose?: number | null
+  plannedTreat?: boolean
 }
 
-export async function analyzeMealPhoto(input: AnalyzeInput): Promise<MealAnalysis> {
+export async function analyzeMeal(input: AnalyzeInput): Promise<MealAnalysis> {
   const { settings } = input
   const client = buildClient(settings)
+  const profile = settings.profile
 
   const context = [
-    `Время приёма пищи: ${input.time}.`,
-    settings.healthContext.trim() && `О человеке: ${settings.healthContext.trim()}`,
-    settings.xeUseNetCarbs
-      ? `Хлебные единицы пользователь считает по усвояемым углеводам, 1 ХЕ = ${settings.xeGrams} г.`
-      : `Хлебные единицы пользователь считает по общим углеводам, 1 ХЕ = ${settings.xeGrams} г.`,
-    input.hint?.trim() && `Уточнение от пользователя (оно важнее твоей догадки по фото): ${input.hint.trim()}`,
+    profileToPrompt(profile),
+    '',
+    `Время приёма: ${input.time}.`,
+    isMorningWindow(input.time)
+      ? 'Это утро — работает феномен зари, крахмал здесь бьёт сильнее обычного.'
+      : null,
+    isLateWindow(input.time)
+      ? 'Это поздний приём: после 20:00 его правило — только белок, и ночью съеденное не сгорит.'
+      : null,
+    input.currentGlucose != null ? `Сахар перед приёмом: ${input.currentGlucose} ммоль/л.` : null,
+    input.plannedTreat
+      ? 'Это запланированный чит-приём. Он часть системы, а не нарушение: разбирай спокойно, ' +
+        'скажи, как пойдёт сахар и что поможет сгладить, но не осуждай сам факт.'
+      : null,
+    input.description?.trim() ? `Описание словами: ${input.description.trim()}` : null,
+    input.hint?.trim() ? `Уточнение (важнее твоей догадки по фото): ${input.hint.trim()}` : null,
   ]
     .filter(Boolean)
     .join('\n')
+
+  const history = historyForPrompt(input.history)
+  const historyBlock = history ? `\n\n# Его прошлые приёмы и как на них отзывался сахар\n\n${history}` : ''
+
+  const content: Anthropic.Beta.BetaContentBlockParam[] = []
+  if (input.imageBase64 && input.mediaType) {
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: input.mediaType, data: input.imageBase64 },
+    })
+  }
+  content.push({ type: 'text', text: `${context}${historyBlock}\n\nРазбери этот приём.` })
 
   try {
     const response = await client.beta.messages.parse({
@@ -136,69 +188,79 @@ export async function analyzeMealPhoto(input: AnalyzeInput): Promise<MealAnalysi
       max_tokens: 16000,
       system: SYSTEM,
       // Серверный фолбэк: если запрос попадёт под классификатор отказа,
-      // ответ придёт от запасной модели, а не ошибкой в лицо пользователю.
+      // ответ придёт от запасной модели, а не ошибкой в момент, когда еда остывает.
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
-      output_config: {
-        effort: settings.effort,
-        format: zodOutputFormat(MealAnalysisSchema),
-      },
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: input.mediaType, data: input.imageBase64 } },
-            { type: 'text', text: `${context}\n\nПроанализируй этот приём пищи.` },
-          ],
-        },
-      ],
+      output_config: { effort: settings.effort, format: zodOutputFormat(AnalysisSchema) },
+      messages: [{ role: 'user', content }],
     })
 
     if (response.stop_reason === 'refusal') {
-      throw new AiError('refusal', 'Модель отказалась разбирать это изображение. Попробуйте другое фото.')
+      throw new AiError('refusal', 'Модель не стала разбирать это изображение. Попробуй другое фото.')
     }
     const parsed = response.parsed_output
-    if (!parsed) {
-      throw new AiError('parse', 'Модель вернула ответ в неожиданном формате. Повторите попытку.')
-    }
+    if (!parsed) throw new AiError('parse', 'Ответ пришёл в неожиданном формате. Повтори попытку.')
     return parsed
   } catch (err) {
     throw toAiError(err)
   }
 }
 
-/** Ответ модели -> позиции дневника. Отрицательные и нечисловые значения
- *  отсекаем здесь: ниже по коду они превратились бы в NaN в итогах. */
 export function analysisToItems(analysis: MealAnalysis): FoodItem[] {
   return analysis.dishes.map((d) => ({
     id: uid(),
     name: d.name,
-    grams: safe(d.grams, 0),
-    gramsMin: safe(d.gramsMin, 0),
-    gramsMax: safe(d.gramsMax, 0),
+    role: d.role,
+    portion: d.portion,
+    grams: safe(d.grams),
+    gramsMin: safe(d.gramsMin),
+    gramsMax: safe(d.gramsMax),
     per100: {
-      kcal: safe(d.per100.kcal, 0),
-      protein: safe(d.per100.protein, 0),
-      fat: safe(d.per100.fat, 0),
-      carbs: safe(d.per100.carbs, 0),
-      fiber: safe(d.per100.fiber, 0),
+      kcal: safe(d.per100.kcal),
+      protein: safe(d.per100.protein),
+      fat: safe(d.per100.fat),
+      carbs: safe(d.per100.carbs),
+      fiber: safe(d.per100.fiber),
     },
     gi: d.gi == null || !Number.isFinite(d.gi) ? null : clamp(d.gi, 0, 110),
     confidence: d.confidence,
-    assumption: [d.detail, d.assumption].filter(Boolean).join(' — ') || undefined,
+    note: d.note?.trim() || undefined,
   }))
 }
 
+export function analysisToPlate(analysis: MealAnalysis): Plate {
+  return {
+    starches: Math.max(0, Math.round(analysis.plate.starches)),
+    hasProtein: analysis.plate.hasProtein,
+    vegShare: analysis.plate.vegShare,
+    hasSweet: analysis.plate.hasSweet,
+    proteinFirst: analysis.plate.proteinFirst,
+  }
+}
 
-function safe(value: number, fallback: number): number {
-  return Number.isFinite(value) && value >= 0 ? value : fallback
+export function analysisToVerdict(analysis: MealAnalysis): MealVerdict {
+  return {
+    verdict: analysis.verdict,
+    isWin: analysis.isWin,
+    verdictReason: analysis.verdictReason,
+    explanation: analysis.explanation,
+    wins: analysis.wins,
+    fix: analysis.fix,
+    warnings: analysis.warnings,
+    questions: analysis.questions,
+    expectedCurve: analysis.expectedCurve,
+    basedOnPastMeals: analysis.basedOnPastMeals,
+  }
+}
+
+function safe(value: number): number {
+  return Number.isFinite(value) && value >= 0 ? value : 0
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
-/** Короткая проверка ключа из настроек, чтобы не выяснять это в момент съёмки. */
 export async function testApiKey(settings: Settings): Promise<string> {
   const client = buildClient(settings)
   try {

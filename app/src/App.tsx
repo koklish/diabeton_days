@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { useStore } from './store'
 import { DayScreen } from './ui/DayScreen'
-import { HistoryScreen } from './ui/HistoryScreen'
+import { PatternsScreen } from './ui/PatternsScreen'
 import { SettingsScreen } from './ui/SettingsScreen'
+import { CravingSheet } from './ui/CravingSheet'
 
-type Tab = 'day' | 'history' | 'settings'
+type Tab = 'day' | 'patterns' | 'settings'
 
 export function App() {
-  const { ready, toast, setDate } = useStore()
+  const { ready, toast } = useStore()
   const [tab, setTab] = useState<Tab>('day')
+  const [craving, setCraving] = useState(false)
 
   if (!ready) {
     return (
@@ -21,26 +23,28 @@ export function App() {
   return (
     <div className="app">
       {tab === 'day' && <DayScreen />}
-      {tab === 'history' && (
-        <HistoryScreen
-          onOpenDay={(date) => {
-            setDate(date)
-            setTab('day')
-          }}
-        />
-      )}
+      {tab === 'patterns' && <PatternsScreen />}
       {tab === 'settings' && <SettingsScreen />}
 
       {toast && <div className={`toast ${toast.kind === 'err' ? 'err' : ''}`}>{toast.text}</div>}
 
+      {/* Кнопка помощи при тяге доступна с любого экрана в одно касание:
+          когда накрывает, искать её по вкладкам — уже поздно. */}
+      {!craving && (
+        <button className="craving-fab" onClick={() => setCraving(true)}>
+          Тянет
+        </button>
+      )}
+      {craving && <CravingSheet onClose={() => setCraving(false)} />}
+
       <nav className="tabbar">
         <button className={tab === 'day' ? 'on' : ''} onClick={() => setTab('day')}>
           <span className="ic">📖</span>
-          Дневник
+          День
         </button>
-        <button className={tab === 'history' ? 'on' : ''} onClick={() => setTab('history')}>
-          <span className="ic">📊</span>
-          История
+        <button className={tab === 'patterns' ? 'on' : ''} onClick={() => setTab('patterns')}>
+          <span className="ic">🔗</span>
+          Связи
         </button>
         <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>
           <span className="ic">⚙️</span>

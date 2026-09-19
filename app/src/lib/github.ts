@@ -89,8 +89,10 @@ async function putFile(
   if (!res.ok) throw await ghError(res)
 }
 
-export async function pushDay(day: DayRecord, settings: Settings): Promise<void> {
-  const json = JSON.stringify(toExportJson(day, settings), null, 2) + '\n'
+/** context — соседние дни: отклик сахара на поздний ужин приходит уже назавтра,
+ *  и без них запись уехала бы без связи «еда → сахар». */
+export async function pushDay(day: DayRecord, settings: Settings, context: DayRecord[] = []): Promise<void> {
+  const json = JSON.stringify(toExportJson(day, settings, context), null, 2) + '\n'
   await putFile(settings, `days/${day.date}.json`, utf8ToBase64(json), `Дневник: ${day.date}`)
 
   if (settings.github.uploadPhotos) {
@@ -112,8 +114,9 @@ export async function pushIndex(days: DayRecord[], settings: Settings): Promise<
     .sort((a, b) => b.date.localeCompare(a.date))
   const payload = {
     generatedAt: new Date().toISOString(),
-    xeGramsPerUnit: settings.xeGrams,
+    targets: settings.profile.targets,
     dayCount: rows.length,
+    hypoTotal: rows.reduce((a, r) => a + r.hypoCount, 0),
     days: rows,
   }
   await putFile(
@@ -143,12 +146,24 @@ export async function syncDays(days: DayRecord[], settings: Settings): Promise<S
   return result
 }
 
-/** Проверка доступа: существует ли репозиторий и есть ли право на запись. */
-export async function testGithub(settings: Settings): Promise<string> {
+export interface RepoCheck {
+  message: string
+  /** Публичный репозиторий для медицинского дневника — это осознанный выбор,
+   *  а не мелочь: приложение обязано сказать об этом прямо. */
+  isPublic: boolean
+}
+
+/** Проверка доступа: существует ли репозиторий, есть ли право на запись
+ *  и не публичный ли он. */
+export async function testGithub(settings: Settings): Promise<RepoCheck> {
   const { owner, repo, branch } = cfg(settings)
   const res = await gh(settings, `/repos/${owner}/${repo}`)
   if (!res.ok) throw await ghError(res)
-  const body = (await res.json()) as { permissions?: { push?: boolean }; default_branch?: string }
+  const body = (await res.json()) as {
+    permissions?: { push?: boolean }
+    default_branch?: string
+    private?: boolean
+  }
   if (!body.permissions?.push) {
     throw new GithubError('Токен видит репозиторий, но не может в него писать. Нужно право Contents: write.')
   }
@@ -157,5 +172,8 @@ export async function testGithub(settings: Settings): Promise<string> {
     throw new GithubError(`Ветка «${branch}» не найдена. Основная ветка репозитория: ${body.default_branch ?? '?'}.`)
   }
   if (!branchRes.ok) throw await ghError(branchRes)
-  return `Доступ есть: ${owner}/${repo}, ветка ${branch}`
+  return {
+    message: `Доступ есть: ${owner}/${repo}, ветка ${branch}`,
+    isPublic: body.private === false,
+  }
 }

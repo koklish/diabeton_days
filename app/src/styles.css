@@ -229,3 +229,70 @@ textarea { min-height: 88px; resize: vertical; line-height: 1.4; }
   box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
 }
 .toast.err { border-color: rgba(248, 113, 113, .45); color: #fecaca; }
+
+/* ---------- Шкалы и метки ---------- */
+.scale { display: flex; gap: 6px; }
+.scale button {
+  flex: 1; min-height: 48px; padding: 0 4px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 11px; font-size: 13px; cursor: pointer;
+}
+.scale button.on { background: var(--accent); border-color: var(--accent); color: #05240f; font-weight: 600; }
+
+.chip.tap { min-height: 36px; padding: 0 12px; cursor: pointer; border-color: var(--border); }
+.chip.tap.on { background: var(--accent-dim); color: var(--text); border-color: var(--accent); }
+
+/* ---------- Предупреждения с протоколом ---------- */
+.alert { border-radius: var(--radius); padding: 14px; border: 1px solid; }
+.alert-title { font-weight: 650; margin-bottom: 8px; }
+.alert-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; line-height: 1.4; }
+.alert.urgent { background: rgba(248, 113, 113, .13); border-color: rgba(248, 113, 113, .45); color: #fecaca; }
+.alert.attention { background: rgba(251, 191, 36, .1); border-color: rgba(251, 191, 36, .35); color: #fde68a; }
+.alert.note { background: var(--surface); border-color: var(--border); color: var(--text); }
+
+/* ---------- Вердикт по приёму ---------- */
+.verdict { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.verdict .mark {
+  min-width: 96px; text-align: center; padding: 7px 12px; border-radius: 999px;
+  font-weight: 650; font-size: 14px;
+}
+.verdict .mark.ok { background: var(--accent-dim); color: #bbf7d0; }
+.verdict .mark.no { background: rgba(251, 191, 36, .16); color: #fde68a; }
+.verdict .why { flex: 1; font-size: 14px; line-height: 1.35; }
+.win-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-dim); color: #bbf7d0;
+  border-radius: 999px; padding: 5px 12px; font-size: 13px; font-weight: 600;
+}
+
+/* ---------- Плитка тарелки ---------- */
+.plate-row { display: flex; gap: 8px; }
+.plate-cell {
+  flex: 1; background: var(--surface-2); border-radius: 11px;
+  padding: 9px 8px; text-align: center;
+}
+.plate-cell .v { font-size: 17px; font-weight: 650; }
+.plate-cell .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.plate-cell.warn .v { color: var(--amber); }
+.plate-cell.good .v { color: var(--accent); }
+
+/* ---------- Кнопка помощи при тяге ---------- */
+.craving-fab {
+  position: fixed; right: 14px; z-index: 35;
+  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 14px);
+  min-height: 52px; padding: 0 20px; border-radius: 26px;
+  background: var(--blue); color: #05203f; border: 0;
+  font-weight: 700; font-size: 15px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  cursor: pointer;
+}
+
+/* ---------- Таймер волны ---------- */
+.timer { font-size: 46px; font-weight: 300; text-align: center; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+
+/* ---------- Находки ---------- */
+.finding { border-top: 1px solid var(--border); padding: 12px 0; }
+.finding:first-of-type { border-top: 0; }
+.finding .ft { font-weight: 600; margin-bottom: 4px; }
+.finding .fx { font-size: 14px; color: var(--muted); line-height: 1.4; }
+.finding .fm { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }

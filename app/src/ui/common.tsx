@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { getPhoto } from '../lib/db'
+import type { Alert } from '../lib/safety'
 
 export function Sheet({
   title,
@@ -13,7 +14,6 @@ export function Sheet({
   children: ReactNode
   action?: ReactNode
 }) {
-  // Пока лист открыт, фон не должен прокручиваться под ним.
   useEffect(() => {
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -44,15 +44,7 @@ export function Sheet({
   )
 }
 
-export function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: ReactNode
-}) {
+export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="field">
       <label>{label}</label>
@@ -62,20 +54,103 @@ export function Field({
   )
 }
 
-/** Фото хранится в IndexedDB; для <img> нужен objectURL, и его надо отзывать. */
+export function Card({
+  title,
+  action,
+  children,
+}: {
+  title: string
+  action?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <div className="card">
+      <div className="card-title">
+        <span>{title}</span>
+        {action}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** Шкала 0–10 пятью крупными кнопками. Ползунок и одиннадцать мелких целей
+ *  неудобны рукам, которые затекают, — а этот раздел заполняется каждый день. */
+const SCALE_STEPS: { value: number; label: string }[] = [
+  { value: 0, label: 'нет' },
+  { value: 3, label: 'слабо' },
+  { value: 5, label: 'средне' },
+  { value: 7, label: 'сильно' },
+  { value: 10, label: 'очень' },
+]
+
+export function Scale({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <div className="field">
+      <label>{label}</label>
+      <div className="scale">
+        {SCALE_STEPS.map((step) => (
+          <button
+            key={step.value}
+            type="button"
+            className={value === step.value ? 'on' : ''}
+            onClick={() => onChange(step.value)}
+          >
+            {step.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Набор переключаемых меток: быстрее и надёжнее, чем вводить текст. */
+export function ChipPicker({
+  options,
+  selected,
+  onToggle,
+}: {
+  options: readonly string[]
+  selected: string[]
+  onToggle: (value: string) => void
+}) {
+  return (
+    <div className="chips">
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          className={`chip tap ${selected.includes(option) ? 'on' : ''}`}
+          onClick={() => onToggle(option)}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function PhotoThumb({ photoId, className }: { photoId: string; className?: string }) {
   const [url, setUrl] = useState<string | null>(null)
 
   useEffect(() => {
-    let revoked = false
+    let cancelled = false
     let created: string | null = null
     void getPhoto(photoId).then((blob) => {
-      if (!blob || revoked) return
+      if (!blob || cancelled) return
       created = URL.createObjectURL(blob)
       setUrl(created)
     })
     return () => {
-      revoked = true
+      cancelled = true
       if (created) URL.revokeObjectURL(created)
     }
   }, [photoId])
@@ -86,6 +161,22 @@ export function PhotoThumb({ photoId, className }: { photoId: string; className?
 
 export function Notice({ kind, children }: { kind: 'ok' | 'err' | 'info'; children: ReactNode }) {
   return <div className={`notice ${kind}`}>{children}</div>
+}
+
+/** Предупреждение с протоколом действий. Читают его не в лучшем состоянии,
+ *  поэтому шаги нумерованные и без лишних слов. */
+export function AlertCard({ alert }: { alert: Alert }) {
+  return (
+    <div className={`alert ${alert.level}`}>
+      <div className="alert-title">{alert.title}</div>
+      <ol className="alert-steps">
+        {alert.steps.map((step, i) => (
+          <li key={i}>{step}</li>
+        ))}
+      </ol>
+      {alert.footnote && <div className="small muted" style={{ marginTop: 8 }}>{alert.footnote}</div>}
+    </div>
+  )
 }
 
 export function ConfidenceChip({ level }: { level: 'high' | 'medium' | 'low' }) {

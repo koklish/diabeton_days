@@ -1,29 +1,37 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { analysisToItems, analyzeMealPhoto, type MealAnalysis } from '../lib/ai'
+import { analysisToVerdict, analyzeMeal, type MealAnalysis } from '../lib/ai'
 import { takePhoto, type CapturedPhoto } from '../lib/photo'
 import { putPhoto } from '../lib/db'
 import { guessMealKind, nowTime, uid } from '../lib/date'
-import { MEAL_KIND_RU, type FoodItem, type Meal, type MealKind } from '../types'
-import { round, roundTotals, sumTotals, itemTotals } from '../lib/nutrition'
+import { MEAL_KIND_RU, type FoodItem, type Meal, type MealKind, type Plate } from '../types'
+import { derivePlate, mealTotals, round } from '../lib/nutrition'
 import { Field, Notice, Sheet } from './common'
-import { ItemEditor } from './ItemEditor'
+import { ItemEditor, blankItem } from './ItemEditor'
+import { VerdictView, PlateView } from './VerdictView'
+import { VoiceButton } from './VoiceButton'
+import { analysisToMealDraft } from './analyzeHelpers'
 
 type Stage = 'pick' | 'working' | 'review'
 
 export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
-  const { settings, day, commitDay, showToast } = useStore()
+  const { settings, day, days, commitDay, showToast } = useStore()
   const [stage, setStage] = useState<Stage>('pick')
   const [photo, setPhoto] = useState<CapturedPhoto | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [analysis, setAnalysis] = useState<MealAnalysis | null>(null)
   const [items, setItems] = useState<FoodItem[]>([])
+  const [plate, setPlate] = useState<Plate>({
+    starches: 0, hasProtein: false, vegShare: 'none', hasSweet: false, proteinFirst: null,
+  })
   const [title, setTitle] = useState('')
   const [kind, setKind] = useState<MealKind>(guessMealKind(nowTime()))
   const [time, setTime] = useState(nowTime())
   const [note, setNote] = useState('')
   const [hint, setHint] = useState('')
+  const [description, setDescription] = useState('')
+  const [plannedTreat, setPlannedTreat] = useState(false)
   const [edited, setEdited] = useState(false)
 
   useEffect(() => {
@@ -33,31 +41,39 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
     return () => URL.revokeObjectURL(url)
   }, [photo])
 
+  /** Последний известный сахар: без него разбор слеп, а замер обычно только что сделан. */
+  const lastGlucose = day.glucose.length > 0 ? day.glucose[day.glucose.length - 1].mmol : null
+
   const run = useCallback(
-    async (captured: CapturedPhoto, userHint: string) => {
+    async (captured: CapturedPhoto | null, userHint: string, text: string) => {
       setStage('working')
       setError(null)
       try {
-        const result = await analyzeMealPhoto({
-          imageBase64: captured.base64,
-          mediaType: captured.mediaType,
+        const result = await analyzeMeal({
+          imageBase64: captured?.base64,
+          mediaType: captured?.mediaType,
+          description: text,
           hint: userHint,
           time,
           settings,
+          history: days,
+          currentGlucose: lastGlucose,
+          plannedTreat,
         })
+        const draft = analysisToMealDraft(result)
         setAnalysis(result)
-        setItems(analysisToItems(result))
-        setTitle(result.mealTitle)
-        setKind(result.mealKind)
+        setItems(draft.items)
+        setPlate(draft.plate)
+        setTitle(draft.title)
+        setKind(draft.kind)
         setEdited(false)
         setStage('review')
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
-        // Снимок остаётся на экране: можно повторить разбор или дозаполнить руками.
         setStage('pick')
       }
     },
-    [settings, time],
+    [settings, time, days, lastGlucose, plannedTreat],
   )
 
   const capture = useCallback(
@@ -67,17 +83,25 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
         const captured = await takePhoto(source)
         if (!captured) return
         setPhoto(captured)
-        await run(captured, hint)
+        await run(captured, hint, description)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [hint, run],
+    [hint, description, run],
   )
+
+  const updateItems = useCallback((next: FoodItem[]) => {
+    setEdited(true)
+    setItems(next)
+    // Структура тарелки пересчитывается сразу: вердикт опирался на неё,
+    // и после правки состава она не должна врать.
+    setPlate((prev) => derivePlate(next, prev))
+  }, [])
 
   const save = useCallback(async () => {
     if (items.length === 0) {
-      setError('Нечего сохранять: список блюд пуст.')
+      setError('Нечего сохранять: список пуст.')
       return
     }
     let photoId: string | undefined
@@ -92,22 +116,24 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
       title: title.trim() || MEAL_KIND_RU[kind],
       photoId,
       items,
+      plate,
+      verdict: analysis ? analysisToVerdict(analysis) : undefined,
       note: note.trim() || undefined,
       source: analysis ? 'ai' : 'manual',
       model: analysis ? settings.model : undefined,
       editedByUser: edited,
+      plannedTreat,
       createdAt: new Date().toISOString(),
     }
-    const meals = [...day.meals, meal].sort((a, b) => a.time.localeCompare(b.time))
-    await commitDay({ ...day, meals })
-    showToast('Приём пищи записан')
+    await commitDay({ ...day, meals: [...day.meals, meal].sort((a, b) => a.time.localeCompare(b.time)) })
+    showToast('Записано')
     onClose()
-  }, [items, photo, time, kind, title, note, analysis, settings.model, edited, day, commitDay, showToast, onClose])
+  }, [items, photo, time, kind, title, plate, analysis, note, settings.model, edited, plannedTreat, day, commitDay, showToast, onClose])
 
-  const totals = roundTotals(sumTotals(items.map((i) => itemTotals(i, settings))))
+  const totals = mealTotals({ items } as Meal)
 
   return (
-    <Sheet title="Новый приём пищи" onClose={onClose}>
+    <Sheet title="Приём пищи" onClose={onClose}>
       {error && (
         <div style={{ marginBottom: 12 }}>
           <Notice kind="err">{error}</Notice>
@@ -121,11 +147,19 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
           {!settings.anthropicApiKey && (
             <div style={{ marginBottom: 12 }}>
               <Notice kind="info">
-                Ключ Anthropic API не задан — фото не получится разобрать автоматически. Откройте
-                «Настройки» и добавьте ключ, либо заполните блюда руками.
+                Ключ Anthropic не задан — разобрать фото нечем. Добавь его в «Настройках» или заполни руками.
               </Notice>
             </div>
           )}
+
+          <div className="switch" style={{ marginBottom: 6 }}>
+            <span>
+              Запланированный вкусный приём
+              <div className="small muted">Часть системы, а не нарушение. Разбор будет без осуждения.</div>
+            </span>
+            <input type="checkbox" checked={plannedTreat} onChange={(e) => setPlannedTreat(e.target.checked)} />
+          </div>
+
           <div className="btn-row" style={{ marginBottom: 10 }}>
             <button className="btn primary" onClick={() => void capture('camera')}>
               📷 Снять
@@ -134,21 +168,41 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
               🖼 Из галереи
             </button>
           </div>
+
           {photo && (
-            <button className="btn block" style={{ marginBottom: 10 }} onClick={() => void run(photo, hint)}>
-              ↻ Разобрать этот снимок заново
+            <button className="btn block" style={{ marginBottom: 10 }} onClick={() => void run(photo, hint, description)}>
+              ↻ Разобрать снимок заново
             </button>
           )}
-          <button
-            className="btn ghost block"
-            onClick={() => {
-              setItems([])
-              setAnalysis(null)
-              setStage('review')
-            }}
-          >
-            Добавить без фото
-          </button>
+
+          <Field label="Или расскажи словами" hint="Если фото нет или на нём не всё видно.">
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Куриное бедро, салат из огурцов, кофе без сахара"
+            />
+            <VoiceButton onText={(t) => setDescription((v) => (v ? `${v} ${t}` : t))} />
+          </Field>
+
+          <div className="btn-row">
+            <button
+              className="btn"
+              disabled={!description.trim()}
+              onClick={() => void run(null, hint, description)}
+            >
+              Разобрать по описанию
+            </button>
+            <button
+              className="btn ghost"
+              onClick={() => {
+                setItems([])
+                setAnalysis(null)
+                setStage('review')
+              }}
+            >
+              Заполнить руками
+            </button>
+          </div>
         </>
       )}
 
@@ -156,9 +210,9 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
         <div className="center-col">
           <div className="spinner" style={{ width: 26, height: 26 }} />
           <div>
-            Разбираю снимок…
+            Разбираю…
             <div className="small muted" style={{ marginTop: 4 }}>
-              Обычно 15–40 секунд. Модель оценивает состав, вес порций и углеводы.
+              Обычно 20–40 секунд. Смотрю состав, вес порций и твою историю по похожим приёмам.
             </div>
           </div>
         </div>
@@ -166,6 +220,16 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
 
       {stage === 'review' && (
         <>
+          {analysis ? (
+            <div style={{ marginBottom: 14 }}>
+              <VerdictView verdict={analysisToVerdict(analysis)} plate={plate} />
+            </div>
+          ) : (
+            <div style={{ marginBottom: 14 }}>
+              <PlateView plate={plate} />
+            </div>
+          )}
+
           <div className="inline" style={{ marginBottom: 12 }}>
             <input type="time" value={time} onChange={(e) => setTime(e.target.value)} aria-label="Время" />
             <select value={kind} onChange={(e) => setKind(e.target.value as MealKind)} aria-label="Приём пищи">
@@ -178,91 +242,37 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
           </div>
 
           <Field label="Название">
-            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Например: гречка с курицей" />
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} />
           </Field>
 
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-title">
-              <span>Итог приёма</span>
-              <span className="muted">{totals.grams} г</span>
+              <span>Состав</span>
+              <span className="muted">углеводы ~{round(totals.carbs)} г</span>
             </div>
-            <div className="totals">
-              <div className="tot">
-                <div className="v">{totals.kcal}</div>
-                <div className="l">ккал</div>
-              </div>
-              <div className="tot">
-                <div className="v">{round(totals.carbs)}</div>
-                <div className="l">углеводы</div>
-              </div>
-              <div className="tot">
-                <div className="v">{round(totals.xe, 1)}</div>
-                <div className="l">ХЕ</div>
-              </div>
-              <div className="tot">
-                <div className="v">{Math.round(totals.gl)}</div>
-                <div className="l">гликем. нагр.</div>
-              </div>
-            </div>
-          </div>
-
-          {analysis?.diabetesNote && (
-            <div style={{ marginBottom: 12 }}>
-              <Notice kind="info">{analysis.diabetesNote}</Notice>
-            </div>
-          )}
-
-          {analysis && analysis.warnings.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <Notice kind="info">
-                <b>Что снижает точность:</b>
-                <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-                  {analysis.warnings.map((w, i) => (
-                    <li key={i}>{w}</li>
-                  ))}
-                </ul>
-              </Notice>
-            </div>
-          )}
-
-          <div className="card" style={{ marginBottom: 12 }}>
-            <div className="card-title">
-              <span>Блюда</span>
-              <span className="muted">{items.length}</span>
-            </div>
-            {items.length === 0 && <div className="empty">Ни одного блюда. Добавьте вручную.</div>}
+            {items.length === 0 && <div className="empty">Пусто. Добавь позицию.</div>}
             {items.map((item) => (
               <ItemEditor
                 key={item.id}
                 item={item}
-                settings={settings}
-                onChange={(next) => {
-                  setEdited(true)
-                  setItems((list) => list.map((i) => (i.id === item.id ? next : i)))
-                }}
-                onRemove={() => {
-                  setEdited(true)
-                  setItems((list) => list.filter((i) => i.id !== item.id))
-                }}
+                onChange={(next) => updateItems(items.map((i) => (i.id === item.id ? next : i)))}
+                onRemove={() => updateItems(items.filter((i) => i.id !== item.id))}
               />
             ))}
             <button
               className="btn sm ghost block"
               style={{ marginTop: 10 }}
-              onClick={() => {
-                setEdited(true)
-                setItems((list) => [...list, blankItem()])
-              }}
+              onClick={() => updateItems([...items, blankItem(uid())])}
             >
-              + Добавить блюдо
+              + Добавить
             </button>
           </div>
 
-          {photo && (
+          {(photo || description) && (
             <div className="card" style={{ marginBottom: 12 }}>
               <div className="card-title">Уточнить и пересчитать</div>
               {analysis && analysis.questions.length > 0 && (
-                <ul className="small muted" style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+                <ul className="small muted" style={{ margin: '0 0 8px', paddingLeft: 18, lineHeight: 1.5 }}>
                   {analysis.questions.map((q, i) => (
                     <li key={i}>{q}</li>
                   ))}
@@ -271,39 +281,32 @@ export function AnalyzeSheet({ onClose }: { onClose: () => void }) {
               <textarea
                 value={hint}
                 onChange={(e) => setHint(e.target.value)}
-                placeholder="Например: хлеб два куска по 30 г, чай без сахара, жарил на столовой ложке масла"
+                placeholder="Хлеб два куска по 30 г, жарил на ложке масла, чай без сахара"
               />
+              <div style={{ marginTop: 8 }}>
+                <VoiceButton onText={(t) => setHint((v) => (v ? `${v} ${t}` : t))} />
+              </div>
               <button
                 className="btn sm block"
                 style={{ marginTop: 8 }}
                 disabled={!hint.trim()}
-                onClick={() => void run(photo, hint)}
+                onClick={() => void run(photo, hint, description)}
               >
-                Пересчитать с учётом уточнения
+                Пересчитать
               </button>
             </div>
           )}
 
           <Field label="Заметка">
-            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Самочувствие, обстоятельства, что не влезло в блюда" />
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} />
+            <VoiceButton onText={(t) => setNote((v) => (v ? `${v} ${t}` : t))} />
           </Field>
 
           <button className="btn primary block" onClick={() => void save()}>
-            Сохранить в дневник
+            Записать
           </button>
         </>
       )}
     </Sheet>
   )
-}
-
-function blankItem(): FoodItem {
-  return {
-    id: uid(),
-    name: '',
-    grams: 100,
-    per100: { kcal: 0, protein: 0, fat: 0, carbs: 0, fiber: 0 },
-    gi: null,
-    confidence: 'low',
-  }
 }

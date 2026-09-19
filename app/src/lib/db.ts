@@ -1,6 +1,6 @@
 import { openDB, type IDBPDatabase } from 'idb'
 import type { DayRecord } from '../types'
-import { emptyDay } from '../types'
+import { emptyDay, normalizeDay } from '../types'
 
 const DB_NAME = 'diabeton-days'
 const DB_VERSION = 1
@@ -23,7 +23,8 @@ function db(): Promise<IDBPDatabase> {
 
 export async function loadDay(date: string): Promise<DayRecord> {
   const found = (await (await db()).get(DAYS, date)) as DayRecord | undefined
-  return found ?? emptyDay(date)
+  // Записи ранних версий не должны падать на полях, которых тогда не было.
+  return found ? normalizeDay(found) : emptyDay(date)
 }
 
 export async function saveDay(day: DayRecord): Promise<DayRecord> {
@@ -39,7 +40,7 @@ export async function listDayKeys(): Promise<string[]> {
 
 export async function listDays(): Promise<DayRecord[]> {
   const all = (await (await db()).getAll(DAYS)) as DayRecord[]
-  return all.sort((a, b) => b.date.localeCompare(a.date))
+  return all.map(normalizeDay).sort((a, b) => b.date.localeCompare(a.date))
 }
 
 export async function deleteDay(date: string): Promise<void> {
